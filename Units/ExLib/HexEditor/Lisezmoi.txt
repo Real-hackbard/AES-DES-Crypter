@@ -1,0 +1,5 @@
+ce composant est freeware et par soucis de poids du zip certains fichiers ne sont pas inclus !!!
+pour avoir le composant au complet veuillez voir le site officiel de l'auteur
+http://www.mirkes.de/en/delphi/vcls/hexedit.php
+
+par contre il se peut que l'auteur fasse de grosses modifications rendant le compo inutilisable avec la demo

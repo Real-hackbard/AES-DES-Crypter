@@ -1,0 +1,933 @@
+unit SfcFastCrypt;
+
+interface
+uses
+
+ {$IFDEF VER140} //D6
+      {$DEFINE DELPHI_7_DOWN}
+ {$ENDIF}
+
+ {$IFDEF VER130} //D5
+      {$DEFINE DELPHI_7_DOWN}
+ {$ENDIF}
+
+ {$IFDEF VER125} //D4
+      {$DEFINE DELPHI_7_DOWN}
+ {$ENDIF}
+
+
+
+ {$IFNDEF DELPHI_7_DOWN}
+        {$WARN UNSAFE_TYPE OFF} // pour D7 et +
+        {$WARN UNSAFE_CODE OFF} // pour D7 et +
+ {$ENDIF}
+
+Classes, SysUtils, Dialogs;
+
+
+const
+  FC_Version              = 'v1.2d';
+  ERR_BAD_KEY             = 'Error Bad (%s) Key';
+  ERR_DECRYPTION_FAILURE  = 'Error (%s) Decryption Failure';
+  ERR_ENCRYPTION_FAILURE  = 'Error (%s) Encryption Failure';
+  ERR_HASH                = 'Error HASH in Mode %s';
+
+  EXIT_SUCCESS	          = 0;
+  EXIT_FAILURE	          = 1;
+
+  // ******************** AES ******************** //
+  AES_BLOCK_SIZE          = 16; // AES BlockSize en Octets
+  N_COLS                  = 4; // the number of columns in the state
+  KS_LENGTH               = 60;
+  AES_128Bits             = 16; // en Octets
+  AES_192Bits             = 24; // en Octets
+  AES_256Bits             = 32; // '   '   '
+
+  // ******************** AES ******************** //
+
+  // ******************** DES ******************** //
+  DES_BLOCK_SIZE          = 8;  // 8 Octets
+  DES_KEY_LENGTH          = 31; //
+  // ******************** DES ******************** //
+
+  // ******************** CRC32 ****************** //
+  CRC32_BLOCK_SIZE        = 1024;
+  CRC32_POLY              = $04C11DB7;
+  // ******************** CRC32 ****************** //
+
+  // ******************** MD5 ******************** //
+  MD5_BLOCK_SIZE          = 1024;
+  MD5_DIGEST_SIZE         = 16;
+  // ******************** MD5 ******************** //
+
+  // ******************** SHA-1 ****************** //
+  SHA1_BLOCK_SIZE         = 64;
+  SHA1_DIGEST_SIZE        = 20;
+  // ******************** SHA-1 ****************** //
+
+  // ******************** SHA-2 ****************** //
+  SHA224_DIGEST_SIZE      = 28;
+  SHA224_BLOCK_SIZE       = 64;
+  SHA256_DIGEST_SIZE      = 32;
+  SHA256_BLOCK_SIZE       = 64;
+  SHA384_DIGEST_SIZE      = 48;
+  SHA384_BLOCK_SIZE       = 128;
+  SHA512_DIGEST_SIZE      = 64;
+  SHA512_BLOCK_SIZE       = 128;
+  SHA2_MAX_DIGEST_SIZE    = SHA512_DIGEST_SIZE;
+  // ******************** SHA-2 ****************** //
+
+
+  Type
+
+  TAES_ctx = packed record
+  ks  : packed array[0..KS_LENGTH-1] of Cardinal;
+  inf : packed record
+        case word of
+        1 : (L : Cardinal);
+        2 : (B : array[0..3] of Byte);
+        end;
+  end;// AESContext;
+  PAES_ctx = ^TAES_ctx;
+
+  TMD5_ctx = packed record
+    Buf    : array[0..3]  of Longword;
+    Bits   : array[0..1]  of Longword;
+    Buffin : array[0..63] of Byte;
+  end;
+  PMD5_ctx = ^TMD5_ctx;
+
+  TMD5Digest = array[0..16] of byte;
+
+  TSha_Context = packed record
+    Count : array[0..1]  of Cardinal;
+    Hash  : array[0..7]  of Cardinal;
+    WBuf  : array[0..63] of Cardinal;
+  end;//
+  PSha_Context = ^TSha_Context;
+
+  {
+  TSha512_ctxA = record
+  Count : array[0..1]  of Int64;
+  Hash  : array[0..7]  of Int64;
+  WBuf  : array[0..63] of Int64;
+  end;
+  }
+  TSha1_ctx   = TSha_Context;
+  TSha224_ctx = TSha_Context;
+  TSha256_ctx = TSha_Context;
+  TSha512_ctx = TSha_Context;
+  TSha384_ctx = TSha512_ctx;
+
+
+  TModeCrypt = (
+  // Cryptage
+    mcAES     ,
+    mcDES     ,
+  // Checksum
+    mcCRC32   ,
+  // Signature
+    mcMD5     ,
+    mcSHA1    ,
+    mcSHA224  ,
+    mcSHA256  ,
+    mcSHA384  ,
+    mcSHA512
+  );
+
+  TFastCryptLoginInfo = record
+    UserName  : String;
+    Password  : String;
+    Iteration : Cardinal;
+    KeyLen    : Cardinal;
+  end;
+
+  TModeCryptKind = (mck_Unknown, mck_Crypt, mck_Hash, mck_CheckSum);
+  TModeCryptInfo = record
+    mc          : TModeCrypt;
+    Name        : PChar;
+    Kind        : TModeCryptKind;
+    BlockSize   : Cardinal;
+    DigestSize  : Cardinal;
+    KeyMin      : Cardinal;  //Mode Crypt Only
+    KeyMax      : Cardinal;  //Mode Crypt Only
+  end;
+
+  const
+     Desc_Crypt    : PChar = 'Cryptage';
+     Desc_Hash     : PChar = 'Hash';
+     Desc_CheckSum : PChar = 'CheckSum';
+     TModeCryptLookup : array[mcAES..mcSHA512] of TModeCryptInfo =
+     (
+
+         (mc : mcAES    ; name : 'AES'    ; Kind : mck_Crypt    ; BlockSize : AES_BLOCK_SIZE    ; DigestSize : 0 ; KeyMin : AES_128Bits div 2 ; KeyMax : AES_256Bits),
+         (mc : mcDES    ; name : 'DES'    ; Kind : mck_Crypt    ; BlockSize : DES_BLOCK_SIZE    ; DigestSize : 0 ; KeyMin : 8                 ; KeyMax : DES_KEY_LENGTH),
+
+         (mc : mcCRC32  ; name : 'CRC32'  ; Kind : mck_CheckSum ; BlockSize : CRC32_BLOCK_SIZE),
+         (mc : mcMD5    ; name : 'MD5'    ; Kind : mck_Hash     ; BlockSize : MD5_BLOCK_SIZE    ; DigestSize : MD5_DIGEST_SIZE),
+         (mc : mcSHA1   ; name : 'SHA1'   ; Kind : mck_Hash     ; BlockSize : SHA1_BLOCK_SIZE   ; DigestSize : SHA1_DIGEST_SIZE),
+         (mc : mcSHA224 ; name : 'SHA224' ; Kind : mck_Hash     ; BlockSize : SHA224_BLOCK_SIZE ; DigestSize : SHA224_DIGEST_SIZE),
+         (mc : mcSHA256 ; name : 'SHA256' ; Kind : mck_Hash     ; BlockSize : SHA256_BLOCK_SIZE ; DigestSize : SHA256_DIGEST_SIZE),
+         (mc : mcSHA384 ; name : 'SHA384' ; Kind : mck_Hash     ; BlockSize : SHA384_BLOCK_SIZE ; DigestSize : SHA384_DIGEST_SIZE),
+         (mc : mcSHA512 ; name : 'SHA512' ; Kind : mck_Hash     ; BlockSize : SHA512_BLOCK_SIZE ; DigestSize : SHA512_DIGEST_SIZE)
+     );
+
+  type
+
+  TSfcFastCrypt = class;
+  TFastCryptErr = class(Exception);
+
+  TForEachCallBack = function (Sender : TSfcFastCrypt ; Max : Integer; P1, P2 : Pointer):Boolean;
+  TSfcFastCrypt    = class(TObject)
+  private
+    FPassword           : String;
+    FModeCrypt          : TModeCrypt;
+    FStream             : TMemoryStream;
+    FData               : TMemoryStream;
+    BufferIn, BufferOut : array[0..1024] of Byte;
+    Key                 : array[0..256]  of Byte;
+    FOnModeCryptChange  : TNotifyEvent;
+    StackCryptList      : TList;// Steack Frite List ?
+    FInitCRC            : Boolean;
+    CrcTab              : array[0..255] of Cardinal;
+    procedure   SetModeCrypt (const Value: TModeCrypt);
+  protected
+    function    Reflect      (ur        : Cardinal ; b : Byte):Cardinal;
+    function    PartialCRC   (uCRC      : Cardinal ; Buf   : PByte ; BuffSize : Cardinal):Cardinal;
+    procedure   InitCRC;
+
+    procedure   ForEach     (ASender :   TSfcFastCrypt; AStream : TStream ; Max :Integer; P1, P2 : Pointer; CallBack : TForEachCallBack);
+    procedure   ResetKey;
+    function    PrepareKey  (IsEncrypt : Boolean=False):Integer;
+    function    InitBuffer  (const Size : Integer):Boolean;
+    procedure   ClearBuffer (const Count : Integer ; ClearBufferIn : Boolean=True ; ClearBufferOut : Boolean= True);
+
+    // ***** ****** //
+    function    Process_CRC32        : Boolean;
+    function    Process_MD5_Hash     : Boolean;
+    function    Process_SHA_Hash     : Boolean;
+    function    Process_AES_Crypt    : Boolean;
+    function    Process_AES_Decrypt  : Boolean;
+    function    Process_DES_Crypt    : Boolean;
+    function    Process_DES_Decrypt  : Boolean;
+    // ***** ***** //
+  public
+    Constructor Create(const Password : String);
+    Destructor  Destroy;override;
+
+    procedure   Reset(CanResetData : Boolean = True ; CanResetStream : Boolean = True);
+    procedure   Clear(Clear_Data : Boolean = True ; Clear_Stream : Boolean = False);
+    procedure   LoadFromFile    (const FileName : String);
+    procedure   LoadFromStream  (Stream : TStream);
+    procedure   LoadFromString  (const Data    : String);
+    procedure   LoadFromStrings (const Strings : TStrings);
+    procedure   SaveToFile  (const FileName : String);
+
+    function    Crypt        : Boolean;
+    function    Decrypt      : Boolean;
+    function    Hash         : Boolean;
+    function    GeneratePass (Login : TFastCryptLoginInfo) : Boolean;
+    function    StreamToHex  (WithSPC : Boolean = False):String;
+    function    StreamToStr:String;
+    function    DataToHex (WithSPC : Boolean = False) : String;
+    function    DataToStr : String;
+    property    Password  : String        read FPassword  write FPassword;
+    property    ModeCrypt : TModeCrypt    read FModeCrypt write SetModeCrypt;
+    property    Stream    : TMemoryStream read FStream    write FStream;
+    property    Data      : TMemoryStream read FData      write FData;
+  published
+    property    OnModeCryptChange : TNotifyEvent read FOnModeCryptChange write FOnModeCryptChange;
+  end;
+
+
+function  ModeCryptToStr        (mc : TModeCrypt):String;
+function  ModeCryptKindToStr    (mc : TModeCrypt):String;
+function  ModeCryptToDigestSize (mc : TModeCrypt):Integer;
+function  ModeCryptToBlockSize  (mc : TModeCrypt):Integer;
+
+function  Stream2Hex            (const Stream : TStream; WithSpc : Boolean=False):String;
+function  HexToStr              (const Data   : String):String;
+function  StrToHex              (const Data   : String):String;
+function  Min                   (const A , B  : Integer): Integer;
+
+implementation
+
+{$L Crypt.obj}
+procedure __llshl ;assembler;
+asm
+   call system.@_llshl
+end;
+
+procedure __llushr;assembler;
+asm
+   call system.@_llushr
+end;
+
+
+procedure _memset (Src : Pointer ;  Value  : Byte  ; Count : Cardinal); cdecl;
+begin
+    FillChar(Src^ , Count , Value);
+end;
+
+procedure _memcpy(Dest , Source: Pointer; Count : Cardinal); cdecl;
+begin
+    Move(Source^, Dest^ , Count);
+end;
+
+function ModeCryptToStr(mc : TModeCrypt):String;
+begin
+    result := StrPas(TModeCryptLookup[mc].Name);
+end;
+
+function ModeCryptKindToStr (mc : TModeCrypt):String;
+begin
+    case TModeCryptLookup[mc].Kind of
+       mck_Unknown  : result := 'Unknown';
+       mck_Crypt    : result := 'Cryptage';
+       mck_Hash     : result := 'Hash';
+       mck_CheckSum : result := 'CheckSum';
+    end;
+end;
+
+function ModeCryptToDigestSize(mc : TModeCrypt):Integer;
+begin
+    result := TModeCryptLookup[mc].DigestSize;
+end;
+
+function ModeCryptToBlockSize (mc : TModeCrypt):Integer;
+begin
+    result := TModeCryptLookup[mc].BlockSize;
+end;
+
+function Stream2Hex(const Stream : TStream; WithSpc : Boolean=False):String;
+var
+  B   : Integer;
+  S   : String;
+  I   : Integer;
+  SPC : String;
+begin
+    Stream.Position := 0;
+    S   := '';
+    SPC := '';
+    if WithSPC then
+       SPC := ' ';
+    for i := 0 to Stream.Size -1 do
+    begin
+        Stream.ReadBuffer(B , 1);
+        S := S + IntToHex(B , 2) + SPC;
+    end;
+    result := TrimRight(S);
+end;
+
+function HexToStr (const Data : String):String;
+var
+  i : Integer;
+begin
+    result := '';
+    for i := 1 to Length(Data)  do
+    begin
+        if ((I mod 2)=1) then
+           result := result + Chr(StrToInt('$' + Copy( Data , i , 2)));
+    end;
+end;
+
+function StrToHex(const Data : String): String;
+var
+  i : Integer;
+begin
+    result := '';
+    for i  := 1 to Length(Data) do
+      result := result + IntToHex( Ord(Data[i]), 2 );
+end;
+
+function Min(const A , B  : Integer): integer;
+begin
+    if A < B then
+       Result := A
+    else
+       Result := B;
+end;
+
+function  aes_Encrypt_Key128 (const key : PCHAR; var ctx : TAES_ctx):word;external;
+function  aes_Encrypt_Key192 (const Key : PCHAR; var ctx : TAES_ctx):word;external;
+function  aes_Encrypt_Key256 (const key : PCHAR; var ctx : TAES_ctx):word;external;
+function  aes_Decrypt_Key128 (const key : PCHAR; var ctx : TAES_ctx):word;external;
+function  aes_Decrypt_Key192 (const key : PCHAR; var ctx : TAES_ctx):word;external;
+function  aes_Decrypt_Key256 (const key : PCHAR; var ctx : TAES_ctx):word;external;
+function  aes_Encrypt_Key    (const Key : PCHAR; KeyLen  : Cardinal; var ctx : TAES_ctx): word;external;
+function  aes_Decrypt_Key    (const Key : PCHAR; KeyLen  : Cardinal; var ctx : TAES_ctx): word;external;
+function  aes_Encrypt        (const Src ; var Dest ; const AESContext : TAES_ctx):word;external;
+function  aes_Decrypt        (const Src ; var Dest ; const AESContext : TAES_ctx):word;external;
+
+procedure MD5Init            (var cxt : TMD5_ctx);external;
+procedure MD5Update          (var ctx : TMD5_ctx ; var Buf ; Len : Cardinal);external;
+procedure MD5Final           (var Digest  : TMD5Digest ; var ctx : TMD5_ctx);external;
+
+function  Sha1_Compile       (var Sha1_ctx : TSha1_ctx):word;external;
+function  Sha1_Begin         (var Sha1_ctx : TSha1_ctx):word;external;
+function  Sha1_Hash          (const Data ; Len : Cardinal; var Sha1_ctx : TSha1_ctx):word;external;
+function  Sha1_End           (var Digest ;  var Sha1_ctx : TSha1_ctx):word;external;
+//function  Sha1        (var Dest ; const Data ; Len : Cardinal):word;external;
+
+procedure Sha224_Begin       (var Sha224_ctx : TSha224_ctx);external;
+// Sha224_Hash => Sha256_hash
+procedure Sha224_End         (var Digest ; var Sha224_ctx  : TSha224_ctx);external;
+
+procedure Sha256_Begin       (var Sha256_ctx   : TSha256_ctx);external;
+procedure Sha256_Hash        (const Data ; Len : Cardinal; var Sha256_ctx : TSha256_ctx);external;
+procedure Sha256_End         (var Digest ; var Sha256_ctx : TSha256_ctx);external;
+
+//function   Sha384       (var Dest ; const Src ; Len : Cardinal):word;external;
+procedure  Sha384_Begin      (var Sha384_ctx : TSha384_ctx);external;
+// Sha384_Hash => Sha512_Hash
+procedure  Sha384_End        (var Digest ; var Sha384_ctx : TSha384_ctx);external;
+
+//function   Sha2         (var Dest ; Size : Cardinal; const Src; Len : Cardinal):word;external;
+//function   Sha512       (var Dest ; const Src; Len : Cardinal):word;external;
+procedure  Sha512_Begin      (var Sha512_ctx : TSha512_ctx);external;
+procedure  Sha512_Hash       (const Data   ; Len : Cardinal ;var Sha512_ctx : TSha512_ctx);external;
+procedure  Sha512_End        (var   Digest ; var Sha512_ctx : TSha512_ctx);external;
+
+// ***** DES *****
+//procedure des_key      (var Dest ; const Key : PChar);external;
+procedure des_ec             (const Src ; var Dest ; const Key : PChar);external;
+procedure des_dc             (const Src ; var Dest ; const Key : PChar);external;
+procedure des_ecm            (const Src ; var Dest ; const Key : PChar);external;
+//procedure des_ec_crypt       (const Src  ; const BlockSize : Integer; var Dest;  const key : PChar);external;
+// ***** DES *****
+
+// *** DeriveKey ***
+procedure derive_key         (const Password : PChar ; PasswordLen : Cardinal ;  const Salt : PChar ; SaltLen : Cardinal ; iter : Cardinal ; var DesKey ; const DestKeyLen : Cardinal);external;
+// *****************
+
+{ TSfcFastCrypt }
+
+procedure TSfcFastCrypt.Clear(Clear_Data : Boolean = True ; Clear_Stream : Boolean = False);
+begin
+    if Clear_Data   then
+       Data.Clear;
+
+    if Clear_Stream then
+       Stream.Clear;
+end;
+
+procedure TSfcFastCrypt.ClearBuffer(const Count : Integer; ClearBufferIn : Boolean=True ; ClearBufferOut : Boolean= True);
+begin
+    if ClearBufferIn  then
+       FillChar(BufferIn, Count, 0);
+
+    if ClearBufferOut then
+       FillChar(BufferOut, Count, 0);
+end;
+
+constructor TSfcFastCrypt.Create(const Password : String);
+begin
+    inherited Create;
+    FPassword      := Password;
+    FStream        := TMemoryStream.Create;
+    FData          := TMemoryStream.Create;
+    FModeCrypt     := mcAES;
+    StackCryptList := TList.Create;
+    FInitCRC       := False;
+end;
+
+
+function TSfcFastCrypt.Crypt: Boolean;
+begin
+    result := False;
+    case ModeCrypt of
+       mcAES : result := Process_AES_Crypt;
+       mcDES : result := Process_DES_Crypt;
+       else ShowMessage('Bad Crypt Mode');
+    end;
+end;
+
+function TSfcFastCrypt.Decrypt: Boolean;
+begin
+    result := False;
+    case ModeCrypt of
+       mcAES : result := Process_AES_Decrypt;
+       mcDES : result := Process_DES_Decrypt;
+       else ShowMessage('Bad Decrypt Mode');
+    end;
+end;
+
+destructor TSfcFastCrypt.Destroy;
+begin
+    FreeAndNil(FStream);
+    FreeAndNil(FData);
+    inherited Destroy;
+end;
+
+function TSfcFastCrypt.Hash: Boolean;
+begin
+    result := False;
+    case ModeCrypt of
+       mcCRC32  : result := Process_CRC32;
+       mcMD5    : result := Process_MD5_Hash;
+       mcSha1 , mcSha224 , mcSha256 , mcSha384 , mcSha512  : result := Process_SHA_Hash;
+       else ShowMessage('Bad Hash Mode');
+    end;
+end;
+
+function TSfcFastCrypt.InitBuffer(const Size : Integer):Boolean;
+begin
+    FillChar(BufferIn , SizeOf(BufferIn) , 0);
+    FillChar(BufferOut, SizeOf(BufferOut), 0);
+    result := True;
+end;
+
+procedure TSfcFastCrypt.LoadFromFile(const FileName: String);
+begin
+    FStream.LoadFromFile(FileName);
+end;
+
+procedure TSfcFastCrypt.LoadFromStream(Stream: TStream);
+begin
+    FStream.LoadFromStream(Stream);
+    FStream.Position := 0;
+end;
+
+function TSfcFastCrypt.Process_AES_Crypt: Boolean;
+
+   function CallBack(Sender : TSfcFastCrypt ; Max : Integer; P1, P2 : Pointer):Boolean;
+   begin
+       with Sender do
+       begin
+           //ClearBuffer(AES_BLOCK_SIZE);
+            if aes_encrypt(BufferIn, BufferOut, PAES_ctx(P1)^) = EXIT_FAILURE then
+               TFastCryptErr.CreateFmt(ERR_ENCRYPTION_FAILURE , ['AES']);
+           Data.WriteBuffer(BufferOut, AES_BLOCK_SIZE);
+           ClearBuffer(AES_BLOCK_SIZE);
+       end;
+       result := true;
+   end;
+
+
+var
+  ctx    : TAES_ctx;
+  KeyLen : Integer;
+begin
+    result := False;
+    KeyLen := PrepareKey(True);
+
+    if aes_encrypt_key(@Key[0] , KeyLen ,  ctx) = EXIT_FAILURE then
+       TFastCryptErr.Create('TSfcFastCrypt.Process_AES_Crypt<Error Bad AES Key>');
+
+    if InitBuffer(AES_BLOCK_SIZE) then
+    begin
+        Clear;
+        Reset;
+        ForEach(Self, Stream, AES_BLOCK_SIZE, @ctx, nil, @CallBack);
+    end;                   // if InitBuffer
+    Data.Position := 0;
+    result := True;
+end;
+
+function TSfcFastCrypt.Process_AES_Decrypt: Boolean;
+
+   function CallBack(Sender : TSfcFastCrypt ; Max : Integer; P1, P2 : Pointer):Boolean;
+   begin
+       with Sender do
+       begin
+           if aes_decrypt(BufferIn          , BufferOut , PAES_ctx(P1)^) = EXIT_FAILURE then
+              TFastCryptErr.CreateFmt(ERR_ENCRYPTION_FAILURE , ['AES']);
+            Data.WriteBuffer(BufferOut, AES_BLOCK_SIZE);// AES_BLOCK_SIZE);
+       end;
+       result := true;
+   end;
+var
+  ctx    : TAES_ctx;
+  KeyLen : Integer;
+begin
+    result := False;
+    Clear;
+    Reset;
+    KeyLen := PrepareKey;
+
+    if aes_decrypt_key(@Key[0] , KeyLen , ctx) = EXIT_FAILURE then
+       TFastCryptErr.CreateFmt(ERR_BAD_KEY, ['Error Bad AES Key']);
+
+    Data.SetSize(Stream.Size);
+    if InitBuffer(AES_BLOCK_SIZE) then
+    begin
+        ForEach(Self, Stream, AES_BLOCK_SIZE, @ctx, nil, @CallBack);
+        {
+        while (Stream.Size - Stream.Position) >= AES_BLOCK_SIZE do
+        begin
+
+            Stream.ReadBuffer(BufferIn       , AES_BLOCK_SIZE );
+
+            if aes_decrypt(BufferIn          , BufferOut , ctx) = EXIT_FAILURE then
+            TFastCryptErr.CreateFmt(ERR_ENCRYPTION_FAILURE , ['AES']);
+
+
+            Data.WriteBuffer(BufferOut , AES_BLOCK_SIZE);
+            ClearBuffer(AES_BLOCK_SIZE);
+        end;
+        }
+        Data.Position := 0;
+        result := True;
+    end;
+end;
+
+function TSfcFastCrypt.Process_SHA_Hash : Boolean;
+
+
+   function CallBack(Sender : TSfcFastCrypt ; Max : Integer; P1, P2 : Pointer):Boolean;
+   begin
+       with Sender do
+       begin
+           case ModeCrypt of
+              mcSha1              :  Sha1_Hash(BufferIn , Max,   PSha_Context(p1)^);
+              mcSha224 , mcSha256 : Sha256_Hash(BufferIn , Max , PSha_Context(p1)^);
+              mcSha384 , mcSha512 : Sha512_Hash(BufferIn , Max , PSha_Context(p1)^);
+           end;
+       end;
+       result := true;
+   end;
+
+var
+  DS     : Integer;// Digest Size
+  BS     : Integer;// Block Size
+  ctx    : TSHA_Context;
+  Ret    : Integer;
+begin
+    result := False;
+    DS  := ModeCryptToDigestSize(ModeCrypt);
+    BS  := ModeCryptToBlockSize (ModeCrypt);
+    ret := EXIT_SUCCESS;
+    if InitBuffer(BS) then
+    begin
+        Data.Clear;
+        Reset;
+        case ModeCrypt of
+           mcSha1   : Sha1_Begin(ctx);
+           mcSha224 : Sha224_Begin(ctx);
+           mcSha256 : Sha256_Begin(ctx);
+           mcSha384 : Sha384_Begin(ctx);
+           mcSha512 : Sha512_Begin(ctx);
+        end;
+
+        ForEach(Self, Stream, BS, @ctx, nil, @CallBack);
+
+        case ModeCrypt of
+           mcSha1   : Sha1_End   (BufferOut, ctx);
+           mcSha224 : Sha224_End (BufferOut, ctx);
+           mcSha256 : Sha256_End (BufferOut, ctx);
+           mcSha384 : Sha384_End (BufferOut, ctx);
+           mcSha512 : Sha512_End (BufferOut, ctx);
+        end;
+
+        if ret = EXIT_FAILURE then
+           TFastCryptErr.CreateFmt(ERR_HASH , [ModeCryptToStr(ModeCrypt)]);
+
+        Data.WriteBuffer(BufferOut, DS);
+        result := True;
+    end;
+end;
+
+procedure TSfcFastCrypt.Reset(CanResetData, CanResetStream: Boolean);
+begin
+    if CanResetData then
+       Data.Position := 0;
+    if CanResetStream then
+       Stream.Position := 0;
+end;
+
+procedure TSfcFastCrypt.ResetKey;
+begin
+    FillChar(Key , SizeOf(Key) , 0);
+end;
+
+procedure TSfcFastCrypt.SaveToFile(const FileName: String);
+begin
+    Data.SaveToFile(FileName);
+end;
+
+function TSfcFastCrypt.DataToHex(WithSpc : Boolean = False): String;
+begin
+    result := Stream2Hex(Data, WithSpc);
+end;
+
+function TSfcFastCrypt.PrepareKey(IsEncrypt: Boolean): Integer;
+begin
+    result := 0;
+    case ModeCrypt of
+       mcAES :
+       begin
+           case Length(Password) of
+              8..16  : result := AES_128Bits;
+              17..24 : result := AES_192Bits;
+              25..32 : result := AES_256Bits;
+           end;
+       end;
+
+       mcDES       : result := DES_KEY_LENGTH;
+    end;
+
+    if result <> 0 then
+    begin
+        ResetKey;
+        Move(PChar(Password)^ , Key  , Min(Result, Length(Password)));
+    end;
+end;
+
+function TSfcFastCrypt.StreamToHex(WithSPC: Boolean=False): String;
+begin
+    result := Stream2Hex(Stream , WithSPC);
+end;
+
+procedure TSfcFastCrypt.SetModeCrypt(const Value: TModeCrypt);
+begin
+    FModeCrypt := Value;
+    if Assigned(FOnModeCryptChange) then FOnModeCryptChange(Self);
+end;
+
+function TSfcFastCrypt.Process_DES_Crypt: Boolean;
+
+   function CallBack(Sender : TSfcFastCrypt ; Max : Integer; P1, P2 : Pointer):Boolean;
+   begin
+       with Sender do
+       begin
+            des_ec(BufferIn                    , BufferOut , @Key[0]);
+            Data.WriteBuffer(BufferOut         , DES_BLOCK_SIZE);
+            ClearBuffer(DES_BLOCK_SIZE);
+       end;
+       result := true;
+   end;
+
+begin
+    result := False;
+    PrepareKey(True);
+    if InitBuffer(DES_BLOCK_SIZE) then
+    begin
+        Clear;
+        Reset;
+        ForEach(Self, Stream, DES_BLOCK_SIZE, nil, nil, @CallBack);
+        {
+           todo test depuis le fichier *.c
+           Data.Clear;
+           Data.SetSize(Stream.Size);
+           des_ec_crypt(Stream.Memory, Stream.Size, Data.Memory^, @Key[0]);
+           Data.Position := 0;
+        }
+
+        result := True;
+    end;
+    Data.Position := 0;
+end;
+
+function TSfcFastCrypt.Process_DES_Decrypt: Boolean;
+
+   function CallBack(Sender : TSfcFastCrypt ; Max : Integer; P1, P2 : Pointer):Boolean;
+   begin
+       with Sender do
+       begin
+            des_dc(BufferIn , BufferOut , @Key[0]);
+            Data.WriteBuffer(BufferOut, DES_BLOCK_SIZE);// avec la taille du bloc
+            ClearBuffer(DES_BLOCK_SIZE);
+       end;
+       result := true;
+   end;
+
+begin
+    result := False;
+    Clear;
+    Reset;
+    PrepareKey;
+    if InitBuffer(DES_BLOCK_SIZE) then
+    begin
+        ForEach(Self, Stream, DES_BLOCK_SIZE, nil, nil, @CallBack);
+        Data.Position := 0;
+        result := True;
+    end;
+end;
+
+
+function TSfcFastCrypt.GeneratePass(Login : TFastCryptLoginInfo): Boolean;
+var
+  PS    : PChar;
+  PSalt : PChar;
+begin
+    result := False;
+    if InitBuffer(Login.KeyLen) then
+    begin
+        PS    := PChar(Login.Password);
+        PSalt := PChar(Login.UserName);
+        Derive_Key(PS , StrLen(PS) , PSalt , StrLen(PSalt) , Login.Iteration , BufferOut , Login.KeyLen);
+        Data.Clear;
+        Data.WriteBuffer(BufferOut , Login.KeyLen);
+        result := True;
+    end;
+end;
+
+
+procedure TSfcFastCrypt.LoadFromString(const Data : String);
+begin
+    FStream.Clear;
+    FStream.WriteBuffer(Data[1] , Length(Data));
+    FStream.Position := 0;
+end;
+
+procedure TSfcFastCrypt.LoadFromStrings(const Strings: TStrings);
+begin
+    FStream.Clear;
+    Strings.SaveToStream(FStream);
+    FStream.Position := 0;
+end;
+
+function TSfcFastCrypt.StreamToStr: String;
+var
+  P : PChar;
+begin
+    if Stream.Size < 1 then Exit;
+       Stream.Position := 0;
+    P := PChar(Stream.Memory);
+    StrLCopy(P , P , Stream.Size);
+    result := P;
+end;
+
+function TSfcFastCrypt.DataToStr: String;
+var
+  P : PChar;
+begin
+    if Data.Size < 1 then Exit;
+    Data.Position := 0;
+    P := PChar(Data.Memory);
+    StrLCopy(P , P , Data.Size);
+    result := P;
+end;
+
+function TSfcFastCrypt.Process_CRC32 : Boolean;
+
+  function CallBack(ASender : TSfcFastCrypt;  Max : Integer ; P1, P2 : Pointer):Boolean;
+  begin
+      with ASender do
+         PCardinal(P1)^ := PartialCRC(PCardinal(P1)^, @BufferIn[0] , Max);
+     result := true;
+  end;
+
+var
+  Max  : Integer;
+  uCRC : Cardinal;
+begin
+	  Max         := CRC32_BLOCK_SIZE;
+    uCRC        := $FFFFFFFF;
+    Data.Clear;
+    InitCRC;
+    ForEach(Self, Stream, Max, @uCrc, nil, @CallBack);
+    uCRC   := (uCRC xor $FFFFFFFF);
+    Data.Clear;
+    Data.Write(uCrc, 4);
+    result := True;
+end;
+
+function TSfcFastCrypt.Process_MD5_Hash: Boolean;
+
+   function CallBack(Sender : TSfcFastCrypt ; Max : Integer; P1, P2 : Pointer):Boolean;
+   begin
+       with Sender do
+       begin
+           MD5Update(PMD5_ctx(P1)^, BufferIn, Max);
+           ClearBuffer(MD5_BLOCK_SIZE);
+       end;
+       result := true;
+   end;
+
+var
+  MD5ctx : TMD5_ctx;
+  Sign   : TMD5Digest;
+  Max    : Integer;
+begin
+    result := True;
+    if InitBuffer(Stream.Size) then
+    begin
+        Data.Clear;
+        Reset;
+        MD5Init(MD5ctx);
+        Max := MD5_BLOCK_SIZE;
+        if Stream.Size < Max then
+           Max := Stream.Size;
+
+        ForEach(Self, Stream, Max, @MD5ctx, nil, @CallBack);
+        MD5Final(Sign, MD5ctx);
+        Data.WriteBuffer(Sign, MD5_DIGEST_SIZE);
+        Data.Position := 0;
+        result := True;
+    end;
+end;
+
+function TSfcFastCrypt.Reflect(ur : Cardinal; b : Byte): Cardinal;
+var
+  val : Cardinal;
+  i   : Integer;
+begin
+ 	  val := 0;
+   	for i := 1 to b do
+    begin
+	  		if (ur and 1)>0 then
+   			   val := val or (1 shl (b - i));
+    		ur := ur shr 1;
+  	end;
+    result := Val;
+end;
+
+function TSfcFastCrypt.PartialCRC(uCRC : Cardinal; Buf : PByte;  BuffSize: Cardinal): Cardinal;
+var
+  I : Integer;
+begin
+    for i := 0 to BuffSize -1 do
+    begin
+        uCRC := (uCRC shr 8) xor CrcTab[(uCRC and $FF) xor Buf^];
+        inc(Buf);
+    end;
+    result := uCRC;
+end;
+
+procedure TSfcFastCrypt.InitCRC;
+var
+  J , K   : Cardinal;
+  I       : Integer;
+//  L       : TStrings;
+begin
+    if FInitCRC then Exit;
+  	for i := 0 to 255 do
+    begin
+        CrcTab[i] := Reflect(i, 8) shl 24;
+    		for J := 0 to 7 do
+        begin
+            K := 0;
+            if (CrcTab[i] and (1 shl 31))>1 then
+                K := Cardinal(CRC32_POLY);
+        	  CrcTab[I] := (CrcTab[I] shl 1) xor K;
+        end;
+        CrcTab[i] := Reflect(CrcTab[i], 32);
+    end;
+    {
+
+    L := TStringList.Create;
+    for i := 0 to 255 do
+    begin
+        L.Add(IntToHex(crcTab[i] ,0));
+    end;
+    L.SaveToFile('Crc32.bin');
+    L.Free;
+    }
+    FInitCRC := True;
+end;
+
+procedure TSfcFastCrypt.ForEach(ASender : TSfcFastCrypt ; AStream : TStream ; Max : Integer; P1, P2 : Pointer; CallBack: TForEachCallBack);
+begin
+    AStream.Seek(0, soFromBeginning);
+    while (AStream.Size - AStream.Position)>= Max do
+    begin
+        // Application.ProcessMessages;
+        CallBack(ASender, AStream.Read(BufferIn, Max), P1, P2);
+    end;
+    Max := (Stream.Size - AStream.Position);
+    if Max >0 then
+       CallBack(ASender, AStream.Read(BufferIn, Max), P1, P2);
+end;
+
+end.
